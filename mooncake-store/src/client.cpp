@@ -16,6 +16,9 @@
 #include "transport/transport.h"
 #include "config.h"
 #include "types.h"
+#ifdef USE_MEMFABRIC
+#include "transport/ascend_transport/memfabric_transport/memfabric_api.h"
+#endif
 
 namespace mooncake {
 
@@ -343,6 +346,18 @@ ErrorCode Client::InitTransferEngine(
                     LOG(ERROR) << "Failed to install Ascend transport";
                     return ErrorCode::INTERNAL_ERROR;
                 }
+            } else if (protocol == "memfabric") {
+                try {
+                    transport = transfer_engine_->installTransport("memfabric", nullptr);
+                } catch (std::exception &e) {
+                    LOG(ERROR) << "memfabric_transport_install_failed error_message=\""
+                               << e.what() << "\"";
+                    return ErrorCode::INTERNAL_ERROR;
+                }
+                if (!transport) {
+                    LOG(ERROR) << "Failed to install MemFabric transport";
+                    return ErrorCode::INTERNAL_ERROR;
+                }
             } else {
                 LOG(ERROR) << "unsupported_protocol protocol=" << protocol;
                 return ErrorCode::INVALID_PARAMS;
@@ -394,6 +409,13 @@ std::optional<std::shared_ptr<Client>> Client::Create(
             LOG(ERROR) << "Invalid fsdir format: " << dir_string;
         }
     }
+
+#ifdef USE_MEMFABRIC
+    if (MemFabricInitSmemBm(master_server_entry) != 0) {
+        LOG(ERROR) << "Failed to init MemFabric smem bm";
+        return std::nullopt;
+    }
+#endif
 
     // Initialize transfer engine
     if (transfer_engine == nullptr) {
@@ -1401,7 +1423,7 @@ tl::expected<void, ErrorCode> Client::MountSegment(const void* buffer,
             return tl::unexpected(ErrorCode::INVALID_PARAMS);
         }
     }
-
+#ifndef USE_MEMFABRIC
     int rc = transfer_engine_->registerLocalMemory(
         (void*)buffer, size, kWildcardLocation, true, true);
     if (rc != 0) {
@@ -1409,7 +1431,7 @@ tl::expected<void, ErrorCode> Client::MountSegment(const void* buffer,
                    << " size=" << size << ", error=" << rc;
         return tl::unexpected(ErrorCode::INVALID_PARAMS);
     }
-
+#endif
     // Build segment with logical name; attach TE endpoint for transport
     Segment segment;
     segment.id = generate_uuid();

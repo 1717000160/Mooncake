@@ -7,6 +7,11 @@ else ()
     file(GLOB ASCEND_SOURCES "ascend_direct_transport/*.cpp")
 endif ()
 
+if (USE_MEMFABRIC)
+    file(GLOB MEMFABRIC_SOURCES "memfabric_transport/*.cpp")
+    list(APPEND ASCEND_SOURCES ${MEMFABRIC_SOURCES})
+endif ()
+
 add_library(ascend_transport OBJECT ${ASCEND_SOURCES})
 
 if (USE_ASCEND)
