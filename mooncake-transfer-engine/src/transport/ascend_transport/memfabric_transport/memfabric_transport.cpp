@@ -2,6 +2,9 @@
  * Copyright (c) Huawei Technologies Co., Ltd. 2025-2025. All rights reserved.
  */
 #include "transport/ascend_transport/memfabric_transport/memfabric_transport.h"
+
+#include <acl/acl.h>
+
 #include "transport/ascend_transport/memfabric_transport/memfabric_api.h"
 
 namespace mooncake {
@@ -9,118 +12,166 @@ MemFabricTransport::MemFabricTransport() {}
 
 MemFabricTransport::~MemFabricTransport() {}
 
-Status MemFabricTransport::submitTransfer(
-    Transport::BatchID batch_id, const std::vector<TransferRequest> &entries) {
-    auto count = entries.size();
-    auto &batch_desc = *((BatchDesc *)(batch_id));
-    if (batch_desc.task_list.size() + count > batch_desc.batch_size) {
-        LOG(ERROR)
-            << "MemFabricTransport: Exceed the limitation of current batch's "
-               "capacity";
-        return Status::InvalidArgument(
-            "MemFabricTransport: Exceed the limitation of capacity, batch "
-            "id: " +
-            std::to_string(batch_id));
-    }
+Status MemFabricTransport::batchCopySmemTrans(const std::unordered_map<SegmentID, std::vector<Slice *>>  &slice_list) {
 
-    size_t task_id = batch_desc.task_list.size();
-    batch_desc.task_list.resize(task_id + count);
-
-    // TODO 一次批量任务中读写混合
-    // TODO 任务来自LocalHost内存
-    smem_bm_copy_type t = entries[0].opcode == TransferRequest::READ
+    for (const auto &items: slice_list) {
+        auto segmentId = items.first;
+        auto slices = items.second;
+        size_t count = slices.size();
+        if (count == 0) {
+            continue;
+        }
+        smem_bm_copy_type t = slices[0]->opcode == TransferRequest::READ
                               ? SMEMB_COPY_G2L
                               : SMEMB_COPY_L2G;
-    std::vector<void *> sources(count);
-    std::vector<void *> destinations(count);
-    std::vector<uint64_t> dataSizes(count);
-    smem_batch_copy_params params{};
-    for (auto &request : entries) {
-        sources.emplace_back(request.source);
-        destinations.emplace_back((void *)request.target_offset);
-        dataSizes.emplace_back(request.length);
-    }
-
-    int ret = MemFabricSmemBmDl::SmemBmCopyBatch(
-        MemFabricSmemBmDl::GetSmemBmHandle(), &params, t, 0);
-    if (ret != 0) {
-        LOG(ERROR) << "MemFabricTransport: Failed to smem bm copy batch, ret:"
-                   << ret;
-    }
-    for (auto &request : entries) {
-        TransferTask &task = batch_desc.task_list[task_id];
-        ++task_id;
-        task.total_bytes = request.length;
-        Slice *slice = getSliceCache().allocate();
-        slice->source_addr = (char *)request.source;
-        slice->memfabric.dest_addr = request.target_offset;
-        slice->length = request.length;
-        slice->opcode = request.opcode;
-        slice->task = &task;
-        slice->target_id = request.target_id;
-        slice->status = Slice::PENDING;
-        __sync_fetch_and_add(&task.slice_count, 1);
-        if (ret != 0) {
-            slice->markFailed();
+        std::string targetName;
+        auto targetSegmentDesc = metadata_->getSegmentDescByID(segmentId);
+        if (targetSegmentDesc != nullptr) {
+            targetName = targetSegmentDesc->name;
         } else {
-            slice->markSuccess();
+            LOG(ERROR) << "MemFabricTransport: failed to get segment by id" << segmentId;
+        }
+        std::vector<const void *> localAddrs(count);
+        std::vector<void *> remoteAddrs(count);
+        std::vector<uint64_t> dataSizes(count);
+        for (size_t i = 0; i < count; ++i) {
+            localAddrs[i] = slices[i]->source_addr;
+            remoteAddrs[i] = (void *)slices[i]->memfabric.dest_addr;
+            dataSizes[i] = slices[i]->length;
+        }
+        auto ret = MemFabricSmemDl::SmemTransBatchCopy(MemFabricSmemDl::GetSmemTransHandle(), localAddrs.data(),
+            targetName.c_str(), remoteAddrs.data(), dataSizes.data(), count, t);
+        if (ret != 0) {
+            LOG(ERROR) << "MemFabricTransport: Failed to smem trans copy batch, ret:" << ret;
+            for (auto &slice : slices) {
+                slice->markFailed();
+            }
+        } else {
+            for (auto &slice : slices) {
+                slice->markSuccess();
+            }
         }
     }
     return Status::OK();
 }
 
-Status MemFabricTransport::submitTransferTask(
-    const std::vector<TransferTask *> &task_list) {
-    uint32_t count = task_list.size();
-
-    // TODO 一次批量任务中读写混合
-    // TODO 任务来自LocalHost内存
-    smem_bm_copy_type t = task_list[0]->request->opcode == TransferRequest::READ
+Status MemFabricTransport::batchCopySmemBm(const std::unordered_map<SegmentID, std::vector<Slice *>>  &slice_list) {
+    for (const auto &items: slice_list) {
+        auto slices = items.second;
+        size_t count = slices.size();
+        if (count == 0) {
+            continue;
+        }
+        smem_bm_copy_type t = slices[0]->opcode == TransferRequest::READ
                               ? SMEMB_COPY_G2L
                               : SMEMB_COPY_L2G;
-    std::vector<void *> sources(count);
-    std::vector<void *> destinations(count);
-    std::vector<uint64_t> dataSizes(count);
-    for (size_t index = 0; index < task_list.size(); ++index) {
-        auto &task = *task_list[index];
-        auto &request = *task.request;
-        sources[index] = request.opcode == TransferRequest::READ
-                             ? reinterpret_cast<void *>(request.target_offset)
-                             : request.source;
-        destinations[index] =
-            request.opcode == TransferRequest::READ
-                ? request.source
-                : reinterpret_cast<void *>(request.target_offset);
-        dataSizes[index] = request.length;
+        std::vector<const void *> sources(count);
+        std::vector<void *> destinations(count);
+        std::vector<uint64_t> dataSizes(count);
+        for (size_t i = 0; i < count; ++i) {
+            sources[i] = (t == SMEMB_COPY_G2L ? (void *)slices[i]->memfabric.dest_addr : slices[i]->source_addr);
+            destinations[i] = (t == SMEMB_COPY_L2G ? (void *)slices[i]->memfabric.dest_addr : slices[i]->source_addr);
+            dataSizes[i] = slices[i]->length;
+        }
+        smem_batch_copy_params params = {const_cast<void **>(sources.data()), destinations.data(),
+                                         dataSizes.data(), static_cast<uint32_t>(count)};
+        auto ret = MemFabricSmemDl::SmemBmCopyBatch(MemFabricSmemDl::GetSmemBmHandle(), &params, t, 0);
+        if (ret != 0) {
+            LOG(ERROR) << "MemFabricTransport: Failed to smem bm copy batch, ret:" << ret;
+            for (auto &slice : slices) {
+                slice->markFailed();
+            }
+        } else {
+            for (auto &slice : slices) {
+                slice->markSuccess();
+            }
+        }
     }
-    smem_batch_copy_params params = {sources.data(), destinations.data(),
-                                     dataSizes.data(), count};
-    int ret = MemFabricSmemBmDl::SmemBmCopyBatch(
-        MemFabricSmemBmDl::GetSmemBmHandle(), &params, t, 0);
-    if (ret != 0) {
-        LOG(ERROR) << "MemFabricTransport: Failed to smem bm copy batch, ret:"
-                   << ret;
+    return Status::OK();
+}
+
+Status MemFabricTransport::batchCopyDefault(const std::unordered_map<SegmentID, std::vector<Slice *>>  &slice_list) {
+    for (const auto &items: slice_list) {
+        auto slices = items.second;
+        for (auto &slice : slices) {
+            slice->markFailed();
+        }
     }
-    for (size_t index = 0; index < task_list.size(); ++index) {
-        auto &task = *task_list[index];
+    return Status::OK();
+}
+
+Status MemFabricTransport::submitTransfer(
+    Transport::BatchID batch_id, const std::vector<TransferRequest> &entries) {
+    auto &batch_desc = *((BatchDesc *)(batch_id));
+    if (batch_desc.task_list.size() + entries.size() > batch_desc.batch_size) {
+        LOG(ERROR) << "MemFabricTransport: Exceed the limitation of current "
+                      "batch's capacity";
+        return Status::InvalidArgument(
+                "MemFabricTransport: Exceed the limitation of capacity, batch "
+                "id: " +
+                std::to_string(batch_id));
+    }
+
+    auto cur_task_size = batch_desc.task_list.size();
+    batch_desc.task_list.resize(cur_task_size + entries.size());
+    std::unordered_map<SegmentID, std::vector<Slice *>> slice_list;
+
+    for (auto &request : entries) {
+        TransferTask &task = batch_desc.task_list[cur_task_size];
+        ++cur_task_size;
+        task.total_bytes = request.length;
+        Slice *slice = getSliceCache().allocate();
+        slice->source_addr = request.source;
+        slice->length = request.length;
+        slice->opcode = request.opcode;
+        slice->target_id = request.target_id;
+        slice->memfabric.dest_addr = request.target_offset;
+        slice->task = &task;
+        slice->status = Slice::PENDING;
+        task.slice_list.push_back(slice);
+        __sync_fetch_and_add(&task.slice_count, 1);
+        slice_list[request.target_id].push_back(slice);
+    }
+    switch (smemType_) {
+        case SMEM_BM:
+            return batchCopySmemBm(slice_list);
+        case SMEM_TRANS:
+            return batchCopySmemTrans(slice_list);
+        default:
+            LOG(ERROR) << "unexpect smem type:" << smemType_;
+            return batchCopyDefault(slice_list);
+    }
+}
+
+Status MemFabricTransport::submitTransferTask(
+    const std::vector<TransferTask *> &task_list) {
+    std::unordered_map<SegmentID, std::vector<Slice *>> slice_list;
+    for (auto index : task_list) {
+        auto &task = *index;
         auto &request = *task.request;
         task.total_bytes = request.length;
         Slice *slice = getSliceCache().allocate();
         slice->source_addr = (char *)request.source;
-        slice->memfabric.dest_addr = request.target_offset;
         slice->length = request.length;
         slice->opcode = request.opcode;
-        slice->task = &task;
         slice->target_id = request.target_id;
+        slice->memfabric.dest_addr = request.target_offset;
+        slice->task = &task;
         slice->status = Slice::PENDING;
+        slice->ts = 0;
+        task.slice_list.push_back(slice);
         __sync_fetch_and_add(&task.slice_count, 1);
-        if (ret != 0) {
-            slice->markFailed();
-        } else {
-            slice->markSuccess();
-        }
+        slice_list[request.target_id].push_back(slice);
     }
-    return Status::OK();
+    switch (smemType_) {
+        case SMEM_BM:
+            return batchCopySmemBm(slice_list);
+        case SMEM_TRANS:
+            return batchCopySmemTrans(slice_list);
+        default:
+            LOG(ERROR) << "unexpect smem type:" << smemType_;
+            return batchCopyDefault(slice_list);
+    }
 }
 
 Status MemFabricTransport::getTransferStatus(
@@ -156,36 +207,104 @@ int MemFabricTransport::install(std::string &local_server_name,
                                 std::shared_ptr<Topology> topo) {
     metadata_ = meta;
     local_server_name_ = local_server_name;
+    smemType_ = MemFabricSmemDl::GetSmemTypeFlag();
 
+    int ret = aclrtGetDevice(&localDeviceId_);
+    if (ret != 0) {
+        LOG(ERROR) << "MemFabricTransport: aclrtGetDevice failed, ret: " << ret;
+        return ret;
+    }
+    switch (smemType_) {
+        case SMEM_BM:
+            ret = MemFabricInitSmemBm(localDeviceId_);
+            break;
+        case SMEM_TRANS:
+            ret = MemFabricInitSmemTrans(local_server_name_, localDeviceId_);
+            break;
+        default:
+            LOG(ERROR) << "unexpect smem type:" << smemType_;
+            return -1;
+    }
+    if (ret != 0) {
+        LOG(ERROR) << "MemFabricTransport: failed to init memfabric smem type:" << smemType_ << " ret:" << ret;
+        return -1;
+    }
     auto desc = std::make_shared<SegmentDesc>();
     if (!desc) return ERR_MEMORY;
     desc->name = local_server_name_;
     desc->protocol = "memfabric";
-    metadata_->addLocalSegment(LOCAL_SEGMENT_ID, local_server_name_,
-                               std::move(desc));
+    metadata_->addLocalSegment(LOCAL_SEGMENT_ID, local_server_name_, std::move(desc));
+    LOG(INFO) << "MemFabricTransport: add segment type:" << smemType_ << " deviceId:"
+              << localDeviceId_ << " segment name:" << local_server_name_ << " protocol:" << desc->protocol;
     return 0;
 }
 
-int MemFabricTransport::registerLocalMemory(void *addr, size_t length,
-                                            const std::string &location,
-                                            bool remote_accessible,
-                                            bool update_metadata) {
+int MemFabricTransport::registerLocalMemory(void *addr, size_t length, const std::string &location,
+                                            bool remote_accessible, bool update_metadata)
+{
+    switch (smemType_) {
+        case SMEM_BM:
+            return MemFabricSmemDl::SmemBmRegisterUserMem(MemFabricSmemDl::GetSmemBmHandle(),
+                                                          reinterpret_cast<uint64_t>(addr), length);
+        case SMEM_TRANS:
+            return MemFabricSmemDl::SmemTransRegisterMem(MemFabricSmemDl::GetSmemTransHandle(), addr, length);
+        default:
+            LOG(ERROR) << "unexpect smem type:" << smemType_;
+            return -1;
+    }
+}
+
+int MemFabricTransport::unregisterLocalMemory(void *addr, bool update_metadata)
+{
     return 0;
 }
 
-int MemFabricTransport::unregisterLocalMemory(void *addr,
-                                              bool update_metadata) {
+int MemFabricTransport::registerLocalMemoryBatch(const std::vector<Transport::BufferEntry> &buffer_list,
+                                                 const std::string &location)
+{
+    switch (smemType_) {
+        case SMEM_BM:
+            return batchRegisterSmemBmMem(buffer_list, location);
+        case SMEM_TRANS:
+            return batchRegisterSmemTransMem(buffer_list, location);
+        default:
+            LOG(ERROR) << "unexpect smem type:" << smemType_;
+            return -1;
+    }
+}
+
+int MemFabricTransport::unregisterLocalMemoryBatch(const std::vector<void *> &addr_list)
+{
     return 0;
 }
 
-int MemFabricTransport::registerLocalMemoryBatch(
-    const std::vector<Transport::BufferEntry> &buffer_list,
-    const std::string &location) {
+int MemFabricTransport::batchRegisterSmemBmMem(const std::vector<Transport::BufferEntry> &buffer_list,
+                                               const std::string &location)
+{
+    for (const auto &item: buffer_list) {
+        auto ret = MemFabricSmemDl::SmemBmRegisterUserMem(MemFabricSmemDl::GetSmemBmHandle(),
+                                                          reinterpret_cast<uint64_t>(item.addr),
+                                                          item.length);
+        if (ret != 0) {
+            LOG(ERROR) << "MemFabricTransport: Failed to register user memory ret:" << ret
+                       << std::hex << " addr:" << item.addr << " size:" << item.length;
+            return ret;
+        }
+    }
     return 0;
 }
 
-int MemFabricTransport::unregisterLocalMemoryBatch(
-    const std::vector<void *> &addr_list) {
-    return 0;
+int MemFabricTransport::batchRegisterSmemTransMem(const std::vector<Transport::BufferEntry> &buffer_list,
+                                                  const std::string &location)
+{
+    uint32_t count = buffer_list.size();
+    std::vector<void *> addrs;
+    std::vector<size_t> lengths;
+    for (uint32_t i = 0; i < count; ++i) {
+        addrs[i] = buffer_list[i].addr;
+        lengths[i] = buffer_list[i].length;
+    }
+    return MemFabricSmemDl::SmemTransBatchRegisterMem(MemFabricSmemDl::GetSmemTransHandle(),
+                                                      addrs.data(), lengths.data(), count, 0);
 }
 }  // namespace mooncake

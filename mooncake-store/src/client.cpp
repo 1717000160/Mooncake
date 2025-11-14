@@ -410,13 +410,6 @@ std::optional<std::shared_ptr<Client>> Client::Create(
         }
     }
 
-#ifdef USE_MEMFABRIC
-    if (MemFabricInitSmemBm(master_server_entry) != 0) {
-        LOG(ERROR) << "Failed to init MemFabric smem bm";
-        return std::nullopt;
-    }
-#endif
-
     // Initialize transfer engine
     if (transfer_engine == nullptr) {
         client->transfer_engine_ = std::make_shared<TransferEngine>();

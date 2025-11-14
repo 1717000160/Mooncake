@@ -12,6 +12,11 @@
 #include <glog/logging.h>
 
 namespace mooncake {
+typedef enum {
+    SMEM_BM,
+    SMEM_TRANS,
+    SMEM_BUTT
+} smem_type;
 
 typedef enum {
     SMEM_MEM_TYPE_LOCAL_DEVICE = 0, /* memory on local device */
@@ -87,7 +92,24 @@ typedef struct {
     smem_tls_config storeTlsConfig;
 } smem_bm_config_t;
 
+typedef enum {
+    SMEM_TRANS_NONE = 0, /* no role */
+    SMEM_TRANS_SENDER,   /* sender */
+    SMEM_TRANS_RECEIVER, /* receiver */
+    SMEM_TRANS_BOTH,     /* both sender and receiver */
+    SMEM_TRANS_BUTT
+} smem_trans_role_t;
+
+typedef struct {
+    smem_trans_role_t role; /* transfer role */
+    uint32_t initTimeout;   /* func timeout, default 120 seconds */
+    uint32_t deviceId;      /* npu device id */
+    uint32_t flags;         /* optional flags */
+    smem_bm_data_op_type dataOpType;  /* data operation type */
+} smem_trans_config_t;
+
 using smem_bm_t = void*;
+using smem_trans_t = void*;
 
 // func
 using FUNC_SMEM_BM_CONFIG_INIT = int32_t (*)(smem_bm_config_t* config);
@@ -128,6 +150,19 @@ using FUNC_SMEM_SET_LOG_LEVEL = int32_t (*)(int level);
 
 using FUNC_SMEM_CREATE_CONFIG_STORE = int32_t (*)(const char* storeUrl);
 
+using FUNC_SMEM_TRANS_INIT = int32_t (*)(const smem_trans_config_t *config);
+using FUNC_SMEM_TRANS_UNINIT = void (*)(uint32_t flags);
+using FUNC_SMEM_TRANS_CREATE = smem_trans_t (*)(const char *, const char *, const smem_trans_config_t *);
+using FUNC_SMEM_TRANS_DESTORY = void (*)(smem_trans_t, uint32_t);
+using FUNC_SMEM_TRANS_REGISTER_MEM = int32_t (*)(smem_trans_t, void *, size_t, uint32_t);
+using FUNC_SMEM_TRANS_UNREGISTER_MEM = int32_t (*)(smem_trans_t, void *[]);
+using FUNC_SMEM_TRANS_BATCH_REGISTER_MEM = int32_t (*)(smem_trans_t, void *[], size_t[], uint32_t, uint32_t);
+using FUNC_SMEM_TRANS_WRITE = int32_t (*)(smem_trans_t, const void *, const char *, void *, size_t);
+using FUNC_SMEM_TRANS_BATCH_WRITE = int32_t (*)(smem_trans_t, const void *[], const char *,
+                                                void *[], size_t [], uint32_t);
+using FUNC_SMEM_TRANS_BATCH_COPY = int32_t (*)(smem_trans_t, const void *[], const char *,
+                                               void *[], size_t[], uint32_t, smem_bm_copy_type);
+
 #define DLSYM(TARGET_FUNC_VAR, TARGET_FUNC_TYPE, FILE_HANDLE, SYMBOL_NAME)   \
     do {                                                                     \
         TARGET_FUNC_VAR = (TARGET_FUNC_TYPE)dlsym(FILE_HANDLE, SYMBOL_NAME); \
@@ -151,14 +186,32 @@ struct MemFabricConfig {
     uint64_t hbmSize{0};
     int32_t logLevel{1};
     smem_bm_data_op_type opType{SMEMB_DATA_OP_DEVICE_RDMA};
+    smem_bm_data_op_type transOpType{SMEMB_DATA_OP_DEVICE_RDMA};
     std::string storeUrl{};
+    // for smem trans
+    smem_trans_role_t role{SMEM_TRANS_NONE};
 };
 
-class MemFabricSmemBmDl {
+class MemFabricSmemDl {
    public:
     static smem_bm_t GetSmemBmHandle()
     {
         return smemBmHandle_;
+    }
+
+    static smem_bm_t GetSmemTransHandle()
+    {
+        return smemTransHandle_;
+    }
+
+    static smem_type GetSmemTypeFlag()
+    {
+        return smemTypeFlag_;
+    }
+
+    static void SetSmemTypeFlag(smem_type smemTypeFlag)
+    {
+        smemTypeFlag_ = smemTypeFlag;
     }
 
     static int32_t SmemBmConfigInit(smem_bm_config_t* config) {
@@ -317,6 +370,92 @@ class MemFabricSmemBmDl {
         return config_;
     }
 
+    static int32_t SmemTranInit(const smem_trans_config_t *config) {
+        if (!pSmemTransInit) {
+
+            LOG(ERROR) << "Call pSmemTransInit is nullptr";
+            return -1;
+        }
+        return pSmemTransInit(config);
+    }
+
+    static void SmemTranUnInit(uint32_t flags) {
+        if (!pSmemTransUnInit) {
+            LOG(ERROR) << "Call pSmemTransUnInit is nullptr";
+            return;
+        }
+        return pSmemTransUnInit(flags);
+    }
+
+    static smem_trans_t SmemTransCreate(const char *storeUrl, const char *uniqueId, const smem_trans_config_t *config) {
+        if (!pSmemTransCreate) {
+            LOG(ERROR) << "Call pSmemTransCreate is nullptr";
+            return nullptr;
+        }
+        smemTransHandle_ = pSmemTransCreate(storeUrl, uniqueId, config);
+        return smemTransHandle_;
+    }
+
+    static void SmemTransDestroy(smem_trans_t trans, uint32_t flags) {
+        if (!pSmemTransDestory) {
+            LOG(ERROR) << "Call pSmemTransDestroy is nullptr";
+            return;
+        }
+        return pSmemTransDestory(trans, flags);
+    }
+
+    static int32_t SmemTransRegisterMem(smem_trans_t trans, void *addr, size_t length, uint32_t flags = 0) {
+        if (!pSmemTransRegisterMem) {
+            LOG(ERROR) << "Call pSmemTransRegisterMem is nullptr";
+            return -1;
+        }
+        return pSmemTransRegisterMem(trans, addr, length, flags);
+    }
+
+    static int32_t SmemTransUnregisterMem(smem_trans_t trans, void *addr[]) {
+        if (!pSmemTransUnregisterMem) {
+            LOG(ERROR) << "Call pSmemTransUnregisterMem is nullptr";
+            return -1;
+        }
+        return pSmemTransUnregisterMem(trans, addr);
+    }
+
+    static int32_t SmemTransBatchRegisterMem(smem_trans_t trans, void *addr[], size_t length[],
+                                             uint32_t count, uint32_t flags) {
+        if (!pSmemTransBatchRegisterMem) {
+            LOG(ERROR) << "Call pSmemTransBatchRegisterMem is nullptr";
+            return -1;
+        }
+        return pSmemTransBatchRegisterMem(trans, addr, length, count, flags);
+    }
+
+    static int32_t SmemTransWrite(smem_trans_t trans, const void *src, const char *destName, void *dest, size_t length) {
+        if (!pSmemTransWrite) {
+            LOG(ERROR) << "Call pSmemTransWrite is nullptr";
+            return -1;
+        }
+        return pSmemTransWrite(trans, src, destName, dest, length);
+    }
+
+    static int32_t SmemTransBatchWrite(smem_trans_t trans, const void *src[], const char *destName, void *dest[],
+                                       size_t length[], uint32_t count) {
+        if (!pSmemTransBatchWrite) {
+            LOG(ERROR) << "Call pSmemTransBatchWrite is nullptr";
+            return -1;
+        }
+        return pSmemTransBatchWrite(trans, src, destName, dest, length, count);
+    }
+
+    static int32_t SmemTransBatchCopy(smem_trans_t handle, const void *localAddrs[], const char *remoteUniqueId,
+                                      void *remoteAddrs[], size_t dataSizes[], uint32_t batchSize,
+                                      smem_bm_copy_type opcode) {
+        if (!pSmemTransBatchCopy) {
+            LOG(ERROR) << "Call pSmemTransBatchCopy is nullptr";
+            return -1;
+        }
+        return pSmemTransBatchCopy(handle, localAddrs, remoteUniqueId, remoteAddrs, dataSizes, batchSize, opcode);
+    }
+
     static void InitMemFabricConfig()
     {
         auto deviceIdStr = std::getenv("MF_DEVICE_ID");
@@ -358,14 +497,38 @@ class MemFabricSmemBmDl {
             config_.opType = SMEMB_DATA_OP_BUTT;
             LOG(WARNING) << "Ignore value from environment variable MF_OP_TYPE";
         }
-        LOG(WARNING) << "Set config opType=" << config_.opType
+        auto transOpTypeStr = std::getenv("MF_PD_OP_TYPE");
+        if (!transOpTypeStr) {
+            config_.transOpType = SMEMB_DATA_OP_DEVICE_RDMA;
+        } else if (std::string_view(opTypeStr) == "device_rdma") {
+            config_.transOpType = SMEMB_DATA_OP_DEVICE_RDMA;
+        } else if (std::string_view(opTypeStr) == "device_sdma") {
+            config_.transOpType = SMEMB_DATA_OP_SDMA;
+        } else {
+            config_.transOpType = SMEMB_DATA_OP_BUTT;
+            LOG(WARNING) << "Ignore value from environment variable MF_OP_TYPE";
+        }
+        LOG(WARNING) << "Set config transOpType=" << config_.transOpType
                      << " by environment variable MF_OP_TYPE";
         auto storeUrlStr = std::getenv("MF_STORE_URL");
         if (storeUrlStr) {
             config_.storeUrl = std::string_view(storeUrlStr);
         }
-        LOG(WARNING) << "Set config storeUrl=" << config_.storeUrl
+        LOG(ERROR) << "Set config storeUrl=" << config_.storeUrl
                      << " by environment variable MF_STORE_URL";
+        auto roleStr = std::getenv("MF_SMEM_TRANS_ROLE");
+        if (roleStr) {
+            if (strcmp(roleStr, "Prefill") == 0) {
+                config_.role = SMEM_TRANS_SENDER;
+            } else if (strcmp(roleStr, "Decode") == 0) {
+                config_.role = SMEM_TRANS_RECEIVER;
+            } else {
+                config_.role = SMEM_TRANS_BUTT;
+                LOG(WARNING) << "Ignore value from environment variable MF_SMEM_TRANS_ROLE";
+            }
+        }
+        LOG(WARNING) << "Set config roleStr=" << roleStr
+                     << " by environment variable MF_SMEM_TRANS_ROLE";
     }
 
     static int32_t LoadMemFabricBmAPI() {
@@ -409,6 +572,17 @@ class MemFabricSmemBmDl {
               "smem_set_log_level");
         DLSYM(pSmemCreateConfigStore, FUNC_SMEM_CREATE_CONFIG_STORE, smemHandle,
               "smem_create_config_store");
+        DLSYM(pSmemTransInit, FUNC_SMEM_TRANS_INIT, smemHandle, "smem_trans_init");
+        DLSYM(pSmemTransUnInit, FUNC_SMEM_TRANS_UNINIT, smemHandle, "smem_trans_uninit");
+        DLSYM(pSmemTransCreate, FUNC_SMEM_TRANS_CREATE, smemHandle, "smem_trans_create");
+        DLSYM(pSmemTransDestory, FUNC_SMEM_TRANS_DESTORY, smemHandle, "smem_trans_destroy");
+        DLSYM(pSmemTransRegisterMem, FUNC_SMEM_TRANS_REGISTER_MEM, smemHandle, "smem_trans_register_mem");
+        DLSYM(pSmemTransUnregisterMem, FUNC_SMEM_TRANS_UNREGISTER_MEM, smemHandle, "smem_trans_deregister_mem");
+        DLSYM(pSmemTransBatchRegisterMem, FUNC_SMEM_TRANS_BATCH_REGISTER_MEM,
+              smemHandle, "smem_trans_batch_register_mem");
+        DLSYM(pSmemTransWrite, FUNC_SMEM_TRANS_WRITE, smemHandle, "smem_trans_write");
+        DLSYM(pSmemTransBatchWrite, FUNC_SMEM_TRANS_BATCH_WRITE, smemHandle, "smem_trans_batch_write");
+        DLSYM(pSmemTransBatchCopy, FUNC_SMEM_TRANS_BATCH_COPY, smemHandle, "smem_trans_batch_copy");
 
         gLoaded_ = true;
         LOG(INFO) << "load memfabric api success";
@@ -434,12 +608,24 @@ private:
     static FUNC_SMEM_SET_EXTERN_LOGGER pSmemSetExternLogger;
     static FUNC_SMEM_SET_LOG_LEVEL pSmemSetLogLevel;
     static FUNC_SMEM_CREATE_CONFIG_STORE pSmemCreateConfigStore;
+    static FUNC_SMEM_TRANS_INIT pSmemTransInit;
+    static FUNC_SMEM_TRANS_UNINIT pSmemTransUnInit;
+    static FUNC_SMEM_TRANS_CREATE pSmemTransCreate;
+    static FUNC_SMEM_TRANS_DESTORY pSmemTransDestory;
+    static FUNC_SMEM_TRANS_REGISTER_MEM pSmemTransRegisterMem;
+    static FUNC_SMEM_TRANS_UNREGISTER_MEM pSmemTransUnregisterMem;
+    static FUNC_SMEM_TRANS_BATCH_REGISTER_MEM pSmemTransBatchRegisterMem;
+    static FUNC_SMEM_TRANS_WRITE pSmemTransWrite;
+    static FUNC_SMEM_TRANS_BATCH_WRITE pSmemTransBatchWrite;
+    static FUNC_SMEM_TRANS_BATCH_COPY pSmemTransBatchCopy;
 
    private:
     static bool gLoaded_;
     static std::mutex mutex_;
     static smem_bm_t smemBmHandle_;
+    static smem_bm_t smemTransHandle_;
     static MemFabricConfig config_;
+    static smem_type smemTypeFlag_;
 
     static inline bool IsSymlink(const std::string& filePath) {
         /* remove / at tail */
@@ -503,7 +689,9 @@ private:
 int MemFabricInitConfigStore(const std::string& store_address,
                              uint32_t storePort);
 // init smem bm
-int MemFabricInitSmemBm(std::string storeUrl = "");
+int MemFabricInitSmemBm(int deviceId);
+// init smem trans
+int MemFabricInitSmemTrans(const std::string& sessionId , int deviceId);
 // get segment info
 std::pair<void*, size_t> MemFabricGetSegment();
 }

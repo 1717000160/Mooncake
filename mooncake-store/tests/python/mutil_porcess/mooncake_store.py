@@ -38,8 +38,7 @@ class Mooncakestore():
                                config.local_buffer_size,
                                config.protocol,
                                config.device_name,
-                               config.master_server_address,
-                               self.transfer_engine_.get_engine())
+                               config.master_server_address)
         if ret != 0:
             msg = "Initialize mooncake failed."
             raise RuntimeError(msg)

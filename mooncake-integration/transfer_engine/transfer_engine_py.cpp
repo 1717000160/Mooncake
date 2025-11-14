@@ -20,6 +20,10 @@
 
 #include <pybind11/stl.h>
 
+#ifdef USE_MEMFABRIC
+#include "transport/ascend_transport/memfabric_transport/memfabric_api.h"
+#endif
+
 #ifdef USE_MNNVL
 #include "transport/nvlink_transport/nvlink_transport.h"
 static void *allocateMemory(size_t size) {
@@ -117,6 +121,10 @@ int TransferEnginePy::initializeExt(const char *local_hostname,
     auto device_name_safe = device_name ? std::string(device_name) : "";
     auto device_filter = buildDeviceFilter(device_name_safe);
     engine_ = std::make_unique<TransferEngine>(true, device_filter);
+
+#ifdef USE_MEMFABRIC
+    MemFabricSmemDl::SetSmemTypeFlag(SMEM_TRANS);
+#endif
     if (getenv("MC_LEGACY_RPC_PORT_BINDING")) {
         auto hostname_port = parseHostNameWithPort(local_hostname);
         int ret =
@@ -356,7 +364,6 @@ int TransferEnginePy::batchTransferSync(
             << "buffers, peer_buffer_addresses and lengths have different size";
         return -1;
     }
-
     const int max_retry = engine_->numContexts() + 1;
     auto start_ts = getCurrentTimeInNano();
     auto total_length = std::accumulate(lengths.begin(), lengths.end(), 0ull);

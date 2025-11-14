@@ -70,6 +70,19 @@ public:
 
     int unregisterLocalMemoryBatch(
         const std::vector<void *> &addr_list) override;
+
+private:
+    int batchRegisterSmemBmMem(const std::vector<Transport::BufferEntry> &buffer_list,
+                               const std::string &location);
+    int batchRegisterSmemTransMem(const std::vector<Transport::BufferEntry> &buffer_list,
+                               const std::string &location);
+    Status batchCopySmemBm(const std::unordered_map<SegmentID, std::vector<Slice *>>  &slice_list);
+    Status batchCopySmemTrans(const std::unordered_map<SegmentID, std::vector<Slice *>>  &slice_list);
+    Status batchCopyDefault(const std::unordered_map<SegmentID, std::vector<Slice *>>  &slice_list);
+
+private:
+    smem_type smemType_{SMEM_BUTT};
+    int32_t localDeviceId_{-1};
 };
 }  // namespace mooncake
 #endif

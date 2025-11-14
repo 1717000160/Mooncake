@@ -56,6 +56,10 @@ if (USE_ASCEND)
   target_link_libraries(transfer_engine PUBLIC ascendcl hccl ascend_transport MPI::MPI)
 endif()
 
+if (USE_MEMFABRIC)
+  target_link_libraries(transfer_engine PUBLIC ascendcl ascend_transport)
+endif()
+
 if (USE_ASCEND_DIRECT)
   find_library(
           FOUND_METADEF

@@ -224,6 +224,12 @@ int TransferEngine::init(const std::string &metadata_conn_string,
                 return -1;
             }
         }
+#elif defined(USE_MEMFABRIC)
+        Transport *memfabric_transport = multi_transports_->installTransport("memfabric", local_topology_);
+        if (!memfabric_transport) {
+            LOG(ERROR) << "Failed to install MemFabric transport";
+            return -1;
+        }
 #else
         if (local_topology_->getHcaList().size() > 0 &&
             !getenv("MC_FORCE_TCP")) {
@@ -241,14 +247,6 @@ int TransferEngine::init(const std::string &metadata_conn_string,
                 LOG(ERROR) << "Failed to install TCP transport";
                 return -1;
             }
-        }
-#endif
-
-#ifdef USE_MEMFABRIC
-        Transport *memfabric_transport = multi_transports_->installTransport("memfabric", local_topology_);
-        if (!memfabric_transport) {
-            LOG(ERROR) << "Failed to install MemFabric transport";
-            return -1;
         }
 #endif
         // TODO: install other transports automatically
