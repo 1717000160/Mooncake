@@ -19,6 +19,7 @@
 #include "transfer_task.h"
 #include "types.h"
 #include "replica.h"
+#include "master_metric_manager.h"
 
 namespace mooncake {
 
@@ -254,6 +255,11 @@ class Client {
         return metrics_->summary_metrics();
     }
 
+    tl::expected<MasterMetricManager::CacheHitStatDict, ErrorCode>
+    CalcCacheStats() {
+        return master_client_.CalcCacheStats();
+    }
+
     // For Prometheus-style metrics
     tl::expected<std::string, ErrorCode> SerializeMetrics() {
         if (metrics_ == nullptr) {
@@ -296,7 +302,9 @@ class Client {
      * @brief Prepare and use the storage backend for persisting data
      */
     void PrepareStorageBackend(const std::string& storage_root_dir,
-                               const std::string& fsdir);
+                               const std::string& fsdir,
+                               bool enable_eviction = true,
+                               uint64_t quota_bytes = 0);
 
     void PutToLocalFile(const std::string& object_key,
                         const std::vector<Slice>& slices,

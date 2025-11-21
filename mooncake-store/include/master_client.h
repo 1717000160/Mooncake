@@ -11,6 +11,7 @@
 #include "replica.h"
 #include "types.h"
 #include "rpc_types.h"
+#include "master_metric_manager.h"
 
 namespace mooncake {
 
@@ -62,6 +63,14 @@ class MasterClient {
      */
     [[nodiscard]] std::vector<tl::expected<bool, ErrorCode>> BatchExistKey(
         const std::vector<std::string>& object_keys);
+
+    /**
+     * @brief Calculate cache hit rate metrics
+     * @param object_keys None
+     * @return Map containing metrics
+     */
+    [[nodiscard]] tl::expected<MasterMetricManager::CacheHitStatDict, ErrorCode>
+    CalcCacheStats();
 
     /**
      * @brief Gets object metadata without transferring data
@@ -210,6 +219,9 @@ class MasterClient {
      * @return GetClusterIdResponse containing the cluster ID
      */
     [[nodiscard]] tl::expected<std::string, ErrorCode> GetFsdir();
+
+    [[nodiscard]] tl::expected<GetStorageConfigResponse, ErrorCode>
+    GetStorageConfig();
 
     /**
      * @brief Pings master to check its availability

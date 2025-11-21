@@ -133,14 +133,14 @@ class MasterService {
 
     /**
      * @brief Start a put operation for an object
-     * @param[out] replica_list Vector to store replica information for slices
+     * @param[out] replica_list Vector to store replica information for the
+     * slice
      * @return ErrorCode::OK on success, ErrorCode::OBJECT_NOT_FOUND if exists,
      *         ErrorCode::NO_AVAILABLE_HANDLE if allocation fails,
      *         ErrorCode::INVALID_PARAMS if slice size is invalid
      */
     auto PutStart(const UUID& client_id, const std::string& key,
-                  const std::vector<uint64_t>& slice_lengths,
-                  const ReplicateConfig& config)
+                  const uint64_t slice_length, const ReplicateConfig& config)
         -> tl::expected<std::vector<Replica::Descriptor>, ErrorCode>;
 
     /**
@@ -219,6 +219,13 @@ class MasterService {
      * is not set
      */
     tl::expected<std::string, ErrorCode> GetFsdir() const;
+
+    /**
+     * @brief Get storage backend configuration including eviction settings
+     * @return GetStorageConfigResponse containing fsdir, enable_disk_eviction,
+     * and quota_bytes
+     */
+    tl::expected<GetStorageConfigResponse, ErrorCode> GetStorageConfig() const;
 
    private:
     // Resolve the key to a sanitized format for storage
@@ -537,6 +544,9 @@ class MasterService {
     const std::string root_fs_dir_;
     // global 3fs/nfs segment size
     int64_t global_file_segment_size_;
+    // storage backend eviction configuration
+    const bool enable_disk_eviction_;
+    const uint64_t quota_bytes_;
 
     bool use_disk_replica_{false};
 

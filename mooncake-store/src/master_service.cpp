@@ -25,6 +25,8 @@ MasterService::MasterService(const MasterServiceConfig& config)
       cluster_id_(config.cluster_id),
       root_fs_dir_(config.root_fs_dir),
       global_file_segment_size_(config.global_file_segment_size),
+      enable_disk_eviction_(config.enable_disk_eviction),
+      quota_bytes_(config.quota_bytes),
       segment_manager_(config.memory_allocator),
       memory_allocator_type_(config.memory_allocator),
       allocation_strategy_(std::make_shared<RandomAllocationStrategy>()),
@@ -325,6 +327,9 @@ auto MasterService::GetReplicaListByRegex(const std::string& regex_pattern)
 auto MasterService::GetReplicaList(std::string_view key)
     -> tl::expected<GetReplicaListResponse, ErrorCode> {
     MetadataAccessor accessor(this, std::string(key));
+
+    MasterMetricManager::instance().inc_total_get_nums();
+
     if (!accessor.Exists()) {
         VLOG(1) << "key=" << key << ", info=object_not_found";
         return tl::make_unexpected(ErrorCode::OBJECT_NOT_FOUND);
@@ -344,6 +349,12 @@ auto MasterService::GetReplicaList(std::string_view key)
         return tl::make_unexpected(ErrorCode::REPLICA_IS_NOT_READY);
     }
 
+    if (replica_list[0].is_memory_replica()) {
+        MasterMetricManager::instance().inc_mem_cache_hit_nums();
+    } else if (replica_list[0].is_disk_replica()) {
+        MasterMetricManager::instance().inc_file_cache_hit_nums();
+    }
+    MasterMetricManager::instance().inc_valid_get_nums();
     // Grant a lease to the object so it will not be removed
     // when the client is reading it.
     metadata.GrantLease(default_kv_lease_ttl_, default_kv_soft_pin_ttl_);
@@ -353,32 +364,29 @@ auto MasterService::GetReplicaList(std::string_view key)
 }
 
 auto MasterService::PutStart(const UUID& client_id, const std::string& key,
-                             const std::vector<uint64_t>& slice_lengths,
+                             const uint64_t slice_length,
                              const ReplicateConfig& config)
     -> tl::expected<std::vector<Replica::Descriptor>, ErrorCode> {
-    if (config.replica_num == 0 || key.empty() || slice_lengths.empty()) {
+    if (config.replica_num == 0 || key.empty() || slice_length == 0) {
         LOG(ERROR) << "key=" << key << ", replica_num=" << config.replica_num
-                   << ", slice_count=" << slice_lengths.size()
+                   << ", slice_length=" << slice_length
                    << ", key_size=" << key.size() << ", error=invalid_params";
         return tl::make_unexpected(ErrorCode::INVALID_PARAMS);
     }
 
     // Validate slice lengths
     uint64_t total_length = 0;
-    for (size_t i = 0; i < slice_lengths.size(); ++i) {
-        if ((memory_allocator_type_ == BufferAllocatorType::CACHELIB) &&
-            (slice_lengths[i] > kMaxSliceSize)) {
-            LOG(ERROR) << "key=" << key << ", slice_index=" << i
-                       << ", slice_size=" << slice_lengths[i]
-                       << ", max_size=" << kMaxSliceSize
-                       << ", error=invalid_slice_size";
-            return tl::make_unexpected(ErrorCode::INVALID_PARAMS);
-        }
-        total_length += slice_lengths[i];
+    if ((memory_allocator_type_ == BufferAllocatorType::CACHELIB) &&
+        (slice_length > kMaxSliceSize)) {
+        LOG(ERROR) << "key=" << key << ", slice_length=" << slice_length
+                   << ", max_size=" << kMaxSliceSize
+                   << ", error=invalid_slice_size";
+        return tl::make_unexpected(ErrorCode::INVALID_PARAMS);
     }
+    total_length += slice_length;
 
     VLOG(1) << "key=" << key << ", value_length=" << total_length
-            << ", slice_count=" << slice_lengths.size() << ", config=" << config
+            << ", slice_length=" << slice_length << ", config=" << config
             << ", action=put_start_begin";
 
     // Lock the shard and check if object already exists
@@ -419,7 +427,7 @@ auto MasterService::PutStart(const UUID& client_id, const std::string& key,
         auto& allocators_by_name = allocator_access.getAllocatorsByName();
 
         auto allocation_result = allocation_strategy_->Allocate(
-            allocators, allocators_by_name, slice_lengths, config);
+            allocators, allocators_by_name, slice_length, config);
 
         if (!allocation_result.has_value()) {
             VLOG(1) << "Failed to allocate all replicas for key=" << key
@@ -487,6 +495,11 @@ auto MasterService::PutEnd(const UUID& client_id, const std::string& key,
         accessor.EraseFromProcessing();
     }
 
+    if (replica_type == ReplicaType::MEMORY) {
+        MasterMetricManager::instance().inc_mem_cache_nums();
+    } else if (replica_type == ReplicaType::DISK) {
+        MasterMetricManager::instance().inc_file_cache_nums();
+    }
     // 1. Set lease timeout to now, indicating that the object has no lease
     // at beginning. 2. If this object has soft pin enabled, set it to be soft
     // pinned.
@@ -515,6 +528,12 @@ auto MasterService::PutRevoke(const UUID& client_id, const std::string& key,
         LOG(ERROR) << "key=" << key << ", status=" << *status
                    << ", error=invalid_replica_status";
         return tl::make_unexpected(ErrorCode::INVALID_WRITE);
+    }
+
+    if (replica_type == ReplicaType::MEMORY) {
+        MasterMetricManager::instance().dec_mem_cache_nums();
+    } else if (replica_type == ReplicaType::DISK) {
+        MasterMetricManager::instance().dec_file_cache_nums();
     }
 
     metadata.EraseReplica(replica_type);
@@ -714,6 +733,19 @@ tl::expected<std::string, ErrorCode> MasterService::GetFsdir() const {
         return std::string();
     }
     return root_fs_dir_ + "/" + cluster_id_;
+}
+
+tl::expected<GetStorageConfigResponse, ErrorCode>
+MasterService::GetStorageConfig() const {
+    if (root_fs_dir_.empty() || cluster_id_.empty()) {
+        LOG(INFO)
+            << "Storage root directory or cluster ID is not set. persisting "
+               "data is disabled.";
+        return GetStorageConfigResponse("", enable_disk_eviction_,
+                                        quota_bytes_);
+    }
+    std::string fsdir = root_fs_dir_ + "/" + cluster_id_;
+    return GetStorageConfigResponse(fsdir, enable_disk_eviction_, quota_bytes_);
 }
 
 void MasterService::EvictionThreadFunc() {
