@@ -39,8 +39,14 @@ Status MemFabricTransport::batchCopySmemTrans(const std::unordered_map<SegmentID
             remoteAddrs[i] = (void *)slices[i]->memfabric.dest_addr;
             dataSizes[i] = slices[i]->length;
         }
-        auto ret = MemFabricSmemDl::SmemTransBatchCopy(MemFabricSmemDl::GetSmemTransHandle(), localAddrs.data(),
-            targetName.c_str(), remoteAddrs.data(), dataSizes.data(), count, t);
+        auto ret = t == SMEMB_COPY_G2L ? MemFabricSmemDl::SmemTransBatchRead(MemFabricSmemDl::GetSmemTransHandle(),
+                                                                            localAddrs.data(), targetName.c_str(),
+                                                                            remoteAddrs.data(), dataSizes.data(),
+                                                                            count)
+                                      : MemFabricSmemDl::SmemTransBatchWrite(MemFabricSmemDl::GetSmemTransHandle(),
+                                                                             localAddrs.data(), targetName.c_str(),
+                                                                             remoteAddrs.data(), dataSizes.data(),
+                                                                             count);
         if (ret != 0) {
             LOG(ERROR) << "MemFabricTransport: Failed to smem trans copy batch, ret:" << ret;
             for (auto &slice : slices) {
