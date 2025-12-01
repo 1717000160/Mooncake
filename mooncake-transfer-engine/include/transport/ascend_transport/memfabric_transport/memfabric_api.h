@@ -178,6 +178,7 @@ using FUNC_SMEM_TRANS_BATCH_READ = int32_t (*)(smem_trans_t, const void *[], con
 
 constexpr uint64_t GB_MEM_BYTES = 1024ULL * 1024ULL * 1024ULL;
 constexpr uint64_t TB_MEM_BYTES = 1024ULL * 1024ULL * 1024ULL * 1024ULL;
+constexpr uint64_t MAX_DRAM_MEM_BYTES = 32 * 1024ULL * 1024ULL * 1024ULL * 1024ULL;
 
 struct MemFabricConfig {
     uint32_t deviceId{0};
@@ -185,6 +186,7 @@ struct MemFabricConfig {
     uint64_t dramSize{GB_MEM_BYTES};
     uint64_t hbmSize{0};
     int32_t logLevel{1};
+    bool useLocalHostMemory{false};
     smem_bm_data_op_type opType{SMEMB_DATA_OP_DEVICE_RDMA};
     smem_bm_data_op_type transOpType{SMEMB_DATA_OP_DEVICE_RDMA};
     std::string storeUrl{};
@@ -481,9 +483,22 @@ class MemFabricSmemDl {
             if (val >= GB_MEM_BYTES && val <= TB_MEM_BYTES &&
                 val % (GB_MEM_BYTES) == 0) {
                 config_.dramSize = val;
+            } else {
+                LOG(ERROR) << "Get config dramSize failed size must in 1GB ~ 1TB"
+                           << " and must align 1GB " << " now is:" << dramSizeStr;
             }
             LOG(WARNING) << "Set config dramSize=" << config_.dramSize
                          << " by environment variable MF_DRAM_SIZE";
+        }
+        config_.worldSize = std::min(config_.worldSize, (uint32_t) (MAX_DRAM_MEM_BYTES / config_.dramSize));
+        auto useLocalHostMemoryStr = std::getenv("MF_USE_LOCAL_HOST");
+        if (useLocalHostMemoryStr) {
+            auto val = atoi(useLocalHostMemoryStr);
+            if (val == 1) {
+                config_.useLocalHostMemory = true;
+            }
+            LOG(WARNING) << "Set config useLocalHostMemory=" << config_.useLocalHostMemory
+                         << " by environment variable MF_USE_LOCAL_HOST";
         }
         auto opTypeStr = std::getenv("MF_OP_TYPE");
         if (!opTypeStr) {
